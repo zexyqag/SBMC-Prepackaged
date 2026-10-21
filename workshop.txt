@@ -1,5 +1,5 @@
 version=1
-id=
+id=3824163693
 title=Steve's Bitchin' Mod Collection (Prepackaged)
 description=[h1]STEVE'S BITCHIN' MOD COLLECTION (PREPACKAGED)[/h1]
 description=[b]The whole collection, set up in one go.[/b]
