@@ -1,0 +1,141 @@
+name: Workshop
+
+# Builds the pack file from pack.txt and the live collection, uploads the Steam Workshop item named by
+# workshop.txt's id=: Contents/, preview.png, and the title, description and visibility in workshop.txt,
+# then attaches the pack file to the release for the drift check. The item's first upload, which also
+# sets its tags, is done from the game.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to upload again (v<N>)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: workshop
+
+# With pipefail, which the default run shell lacks.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Project Zomboid
+  APP_ID: '108600'
+  # steamcmd/steamcmd:ubuntu-22
+  STEAMCMD: steamcmd/steamcmd@sha256:d01556886b9b48a85ea68bfe34197a67e710b74aa61b28aec43ab97f2eee4249
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    environment: steam
+    steps:
+      - name: Version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          whole='^v[1-9][0-9]{0,8}$'
+          [[ "$TAG" =~ $whole ]] || fail "the release tag $TAG is not v<N>, with N the pack's version, a whole number from 1"
+          version=${TAG#v}
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.draft | not) | .tag_name' > "$RUNNER_TEMP/tags"
+          grep -qxF "$TAG" "$RUNNER_TEMP/tags" || fail "there is no published release $TAG"
+          # Prepackaged offers a pack update only when its version goes up.
+          while read -r other; do
+            if [[ "$other" =~ $whole ]] && [ "$other" != "$TAG" ] && [ "${other#v}" -ge "$version" ]; then
+              fail "release $other is not older than $TAG: each release must raise the version"
+            fi
+          done < "$RUNNER_TEMP/tags"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Prepackaged's repository
+        env:
+          PREPACKAGED_REPO: ${{ vars.PREPACKAGED_REPO }}
+        run: |
+          [ -n "$PREPACKAGED_REPO" ] || { echo "::error::set the repository variable PREPACKAGED_REPO to Prepackaged's GitHub repository (owner/name): its parser checks the pack file"; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.PREPACKAGED_REPO }}
+          path: prepackaged
+          persist-credentials: false
+
+      - name: Lua
+        run: sudo apt-get update -q && sudo apt-get install -y -q lua5.1
+
+      - name: Pack file
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 build.py --version "$VERSION" --parser prepackaged/Contents/mods/Prepackaged/42/media/lua/shared
+
+      - name: Item manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          field() { sed -n "s/^$1=//p" workshop.txt | tr -d '\r'; }
+          fail() { echo "::error::$1"; exit 1; }
+          id=$(field id)
+          [ -n "$id" ] || fail "workshop.txt has no id=: upload the item once from the game and commit the id it writes"
+          [ -f preview.png ] || fail "preview.png is missing: add the item's art"
+          # The same numbers as the game's uploader.
+          case $(field visibility) in
+            public) visibility=0 ;;
+            friendsOnly) visibility=1 ;;
+            private) visibility=2 ;;
+            unlisted) visibility=3 ;;
+            *) fail "workshop.txt visibility= is not public, friendsOnly, private or unlisted" ;;
+          esac
+          title=$(field title)
+          description=$(field description)
+          # They go into quoted VDF strings.
+          if printf '%s%s' "$title" "$description" | grep -q '"'; then
+            fail "workshop.txt's title and description can't hold a double quote"
+          fi
+          [ "$(printf '%s' "$description" | wc -c)" -le 8000 ] || fail "workshop.txt's description is over Steam's 8000 bytes"
+          body=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          note=$(printf '%s' "${body:-$TAG}" | tr -d '\r' | tr '"' "'")
+          cat > "$RUNNER_TEMP/item.vdf" <<VDF
+          "workshopitem"
+          {
+            "appid" "$APP_ID"
+            "publishedfileid" "$id"
+            "contentfolder" "/item/Contents"
+            "previewfile" "/item/preview.png"
+            "visibility" "$visibility"
+            "title" "$title"
+            "description" "$description"
+            "changenote" "$note"
+          }
+          VDF
+
+      - name: Upload
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          # steamcmd keeps its login under $HOME/Steam; the secret is that config.vdf after a login with Steam Guard.
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$home/Steam/config"
+          printf '%s\n' "$STEAM_CONFIG_VDF" > "$home/Steam/config/config.vdf"
+          docker run --rm -e HOME=/home/ci -v "$home:/home/ci" -v "$GITHUB_WORKSPACE:/item:ro" \
+            -v "$RUNNER_TEMP/item.vdf:/item.vdf:ro" "$STEAMCMD" \
+            +login "$STEAM_USERNAME" +workshop_build_item /item.vdf +quit || {
+            cat "$home"/Steam/logs/*.txt 2>/dev/null || true
+            exit 1
+          }
+
+      - name: Attach the pack file
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" Contents/mods/*/common/prepackaged.txt --repo "$GITHUB_REPOSITORY" --clobber

@@ -1,0 +1,22 @@
+version=1
+id=
+title=Steve's Bitchin' Mod Collection (Prepackaged)
+description=[h1]STEVE'S BITCHIN' MOD COLLECTION (PREPACKAGED)[/h1]
+description=[b]The whole collection, set up in one go.[/b]
+description=
+description=This is the pack for [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3556493168]Steve's Bitchin' Mod Collection[/url]: its mods in their load order. It needs the Prepackaged mod, which enables them for you after showing you exactly what changes.
+description=
+description=[h2]USE IT[/h2]
+description=[list]
+description=[*]Subscribe to the collection, this pack and Prepackaged.
+description=[*]Enable Prepackaged in the Mods screen.
+description=[*]Press Prepackaged in the bottom right corner of the main menu, pick Steve's Bitchin' Mod Collection and apply.
+description=[/list]
+description=Your mod list is backed up first, in its exact load order. Restore in the Prepackaged window brings it back.
+description=
+description=[h2]UPDATES[/h2]
+description=Each update of this pack follows the collection. Prepackaged then offers it from the main menu, and only the pack's own mods change: mods you added yourself stay.
+description=
+description=Mod ID: SBMCPrepackaged
+tags=Build 42;Multiplayer
+visibility=unlisted

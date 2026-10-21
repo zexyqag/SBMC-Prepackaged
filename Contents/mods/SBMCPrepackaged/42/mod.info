@@ -1,0 +1,5 @@
+name=Steve's Bitchin' Mod Collection (Prepackaged)
+id=SBMCPrepackaged
+description=The Prepackaged pack of Steve's Bitchin' Mod Collection: its mods in their load order, enabled by Prepackaged after a review.
+require=\Prepackaged
+versionMin=42.20

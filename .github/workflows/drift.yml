@@ -1,0 +1,95 @@
+name: Drift
+
+# Compares the live collection with the pack file attached to the latest release, and keeps one issue
+# open while they differ.
+on:
+  schedule:
+    - cron: '41 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: drift
+
+# With pipefail, which the default run shell lacks.
+defaults:
+  run:
+    shell: bash
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  TITLE: The collection has changed since the latest release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.latest.outputs.tag }}
+    steps:
+      - name: Latest release
+        id: latest
+        run: |
+          if ! release=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" 2> "$RUNNER_TEMP/error"); then
+            grep -q 'HTTP 404' "$RUNNER_TEMP/error" || { cat "$RUNNER_TEMP/error"; exit 1; }
+            echo "::notice::There is no release yet, so nothing to compare with"
+            exit 0
+          fi
+          tag=$(jq -r .tag_name <<< "$release")
+          if ! jq -e 'any(.assets[]; .name == "prepackaged.txt")' <<< "$release" > /dev/null; then
+            echo "::error::the latest release, $tag, has no prepackaged.txt: run the Workshop workflow for it again"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: release
+    if: needs.release.outputs.tag
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepackaged's repository
+        env:
+          PREPACKAGED_REPO: ${{ vars.PREPACKAGED_REPO }}
+        run: |
+          [ -n "$PREPACKAGED_REPO" ] || { echo "::error::set the repository variable PREPACKAGED_REPO to Prepackaged's GitHub repository (owner/name): its parser checks the pack file"; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.PREPACKAGED_REPO }}
+          path: prepackaged
+          persist-credentials: false
+
+      - name: Lua
+        run: sudo apt-get update -q && sudo apt-get install -y -q lua5.1
+
+      - name: Compare
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern prepackaged.txt --dir "$RUNNER_TEMP/released"
+          python3 build.py --version "${TAG#v}" --parser prepackaged/Contents/mods/Prepackaged/42/media/lua/shared \
+            --compare "$RUNNER_TEMP/released/prepackaged.txt" --issue "$RUNNER_TEMP/issue.md"
+
+      - name: Issue
+        run: |
+          # Only an issue this workflow opened: anyone can open one with the same title.
+          issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,title,author,body \
+            | jq -c --arg title "$TITLE" 'map(select(.title == $title and (.author.login | test("^(app/)?github-actions(\\[bot\\])?$"))))
+                | max_by(.number) // empty')
+          number=$(jq -r '.number // empty' <<< "${issue:-null}")
+          if [ -s "$RUNNER_TEMP/issue.md" ] && [ -n "$number" ]; then
+            if [ "$(jq -r .body <<< "$issue" | tr -d '\r')" != "$(cat "$RUNNER_TEMP/issue.md")" ]; then
+              echo "Updating issue #$number"
+              gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/issue.md"
+            fi
+          elif [ -s "$RUNNER_TEMP/issue.md" ]; then
+            echo "Opening an issue"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
+          elif [ -n "$number" ]; then
+            echo "Closing issue #$number"
+            gh issue close "$number" --repo "$GITHUB_REPOSITORY" --reason completed --comment "The collection matches $TAG again."
+          fi

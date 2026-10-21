@@ -1,0 +1,13 @@
+/*
+!/.gitignore
+!/README.md
+!/workshop.txt
+!/preview.png
+!/pack.txt
+!/build.py
+!/Contents/
+!/.github/
+/.github/*
+!/.github/workflows/
+# Built from pack.txt at release time and attached to the release.
+/Contents/**/prepackaged.txt
