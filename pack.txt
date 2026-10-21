@@ -4,6 +4,7 @@
 id = SBMC
 name = Steve's Bitchin' Mod Collection
 collection = 3556493168
+Mods = Prepackaged
 Mods = ZombieBuddy
 Mods = Viewpoint
 Mods = PROJECTRVInterior42
@@ -312,7 +313,6 @@ Mods = DGVCurtains
 Mods = BasileDoors3D
 Mods = Tuna_GunRacks
 Mods = Tuna_EquipmentRacks
-Mods = Prepackaged
 Mods = SBMCPrepackaged
 
 @optional
