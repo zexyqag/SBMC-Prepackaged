@@ -1,0 +1,225 @@
+name: Publish
+
+# Releases the pack: builds the pack file from pack.txt and the live collection, compares it with the latest
+# release's, takes the next version from the commits since then, creates the release with its change log and
+# uploads the Steam Workshop item named by workshop.txt's id=. Until workshop.txt has an id=, a release is only
+# built: the item's first upload, which creates it and sets its tags, is done from the game.
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: Notes at the top of the change log (Markdown)
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+
+# With pipefail, which the default run shell lacks.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Project Zomboid
+  APP_ID: '108600'
+  # steamcmd/steamcmd:ubuntu-22
+  STEAMCMD: steamcmd/steamcmd@sha256:d01556886b9b48a85ea68bfe34197a67e710b74aa61b28aec43ab97f2eee4249
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: steam
+    steps:
+      # The tags and the commits since the latest release.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepackaged's repository
+        env:
+          PREPACKAGED_REPO: ${{ vars.PREPACKAGED_REPO }}
+        run: |
+          [ -n "$PREPACKAGED_REPO" ] || { echo "::error::set the repository variable PREPACKAGED_REPO to Prepackaged's GitHub repository (owner/name): its parser checks the pack file"; exit 1; }
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.PREPACKAGED_REPO }}
+          path: prepackaged
+          persist-credentials: false
+
+      - name: Lua
+        run: sudo apt-get update -q && sudo apt-get install -y -q lua5.1
+
+      - name: Latest release
+        id: latest
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.draft | not) | {tag: .tag_name, prerelease, assets: [.assets[].name]} | tojson' > "$RUNNER_TEMP/releases.json"
+          python3 publish.py latest "$RUNNER_TEMP/releases.json"
+
+      # A release stays a pre-release until its upload finishes: this run uploads it again, as it was built. The
+      # item's files come from its tag, the scripts stay this commit's.
+      - name: Pending release
+        if: steps.latest.outputs.pending == 'true'
+        env:
+          TAG: ${{ steps.latest.outputs.tag }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        run: |
+          git restore --source="$TAG" --worktree -- Contents preview.png workshop.txt
+          mod=$(dirname "$(dirname "$(echo Contents/mods/*/42/mod.info)")")
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern prepackaged.txt --dir "$mod/common" --clobber
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          echo "::notice::$TAG is released, but its Workshop upload didn't finish: this run uploads it again. Run Publish once more to publish what changed since."
+          { echo "MODE=retry"; echo "TAG=$TAG"; echo "VERSION=$VERSION"; } >> "$GITHUB_ENV"
+
+      - name: Version
+        id: version
+        if: steps.latest.outputs.pending != 'true'
+        env:
+          SINCE: ${{ steps.latest.outputs.tag }}
+        run: python3 publish.py version --since "$SINCE" --commits "$RUNNER_TEMP/commits.json"
+
+      - name: Pack file
+        if: steps.latest.outputs.pending != 'true'
+        env:
+          SINCE: ${{ steps.latest.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          previous=()
+          if [ -n "$SINCE" ]; then
+            gh release download "$SINCE" --repo "$GITHUB_REPOSITORY" --pattern prepackaged.txt --dir "$RUNNER_TEMP/released"
+            previous=(--previous "$RUNNER_TEMP/released/prepackaged.txt")
+          fi
+          python3 build.py --version "$VERSION" --parser prepackaged/Contents/mods/Prepackaged/42/media/lua/shared \
+            --changes "$RUNNER_TEMP/changes.json" "${previous[@]}"
+
+      - name: Plan
+        if: steps.latest.outputs.pending != 'true'
+        env:
+          SINCE: ${{ steps.latest.outputs.tag }}
+          NEXT: ${{ steps.version.outputs.version }}
+        run: |
+          released=()
+          [ -z "$SINCE" ] || released=(--since "$SINCE" --released "$RUNNER_TEMP/released/prepackaged.txt")
+          python3 publish.py plan --built "$(echo Contents/mods/*/common/prepackaged.txt)" --files "$RUNNER_TEMP/files.json" \
+            --next "$NEXT" "${released[@]}"
+
+      - name: Change log
+        if: env.MODE == 'release'
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          python3 publish.py notes --notes="$NOTES" --commits "$RUNNER_TEMP/commits.json" --changes "$RUNNER_TEMP/changes.json" \
+            --files "$RUNNER_TEMP/files.json" --out "$RUNNER_TEMP/notes.md"
+
+      - name: Item id
+        id: item
+        if: env.MODE != 'none'
+        run: |
+          id=$(sed -n 's/^id=//p' workshop.txt | tr -d '\r')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          if [ -n "$id" ]; then
+            exit 0
+          elif [ "$MODE" = retry ]; then
+            echo "::error::$TAG is a pre-release, which Publish leaves until the Workshop upload finishes, but its workshop.txt has no id=: make it a full release on GitHub, or delete it"
+            exit 1
+          elif [ "$MODE" = page ]; then
+            echo "::notice::workshop.txt has no id= yet, so there is no Workshop page to update."
+          else
+            echo "::notice::workshop.txt has no id= yet, so this release is only built. Put its prepackaged.txt in $(echo Contents/mods/*/common)/, upload the item once from the game and commit the id= the game writes into workshop.txt. Later releases upload by themselves."
+          fi
+
+      - name: Item manifest
+        if: env.MODE != 'none' && steps.item.outputs.id != ''
+        env:
+          ID: ${{ steps.item.outputs.id }}
+        run: |
+          field() { sed -n "s/^$1=//p" workshop.txt | tr -d '\r'; }
+          fail() { echo "::error::$1"; exit 1; }
+          [ -f preview.png ] || fail "preview.png is missing: add the item's art"
+          # The same numbers as the game's uploader.
+          case $(field visibility) in
+            public) visibility=0 ;;
+            friendsOnly) visibility=1 ;;
+            private) visibility=2 ;;
+            unlisted) visibility=3 ;;
+            *) fail "workshop.txt visibility= is not public, friendsOnly, private or unlisted" ;;
+          esac
+          title=$(field title)
+          description=$(field description)
+          # They go into quoted VDF strings.
+          if printf '%s%s' "$title" "$description" | grep -q '"'; then
+            fail "workshop.txt's title and description can't hold a double quote"
+          fi
+          [ "$(printf '%s' "$title" | wc -c)" -le 128 ] || fail "workshop.txt's title is over Steam's 128 bytes"
+          [ "$(printf '%s' "$description" | wc -c)" -le 8000 ] || fail "workshop.txt's description is over Steam's 8000 bytes"
+          if [ "$MODE" = page ]; then
+            note="The Workshop page is updated. The pack is still version $VERSION."
+          else
+            python3 publish.py steam --notes "$RUNNER_TEMP/notes.md" --version "$VERSION" \
+              --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" --out "$RUNNER_TEMP/changenote.txt"
+            note=$(cat "$RUNNER_TEMP/changenote.txt")
+          fi
+          {
+            echo '"workshopitem"'
+            echo '{'
+            echo "  \"appid\" \"$APP_ID\""
+            echo "  \"publishedfileid\" \"$ID\""
+            # Without contentfolder the item keeps its files: a page update leaves the pack as it is.
+            [ "$MODE" = page ] || echo '  "contentfolder" "/item/Contents"'
+            echo '  "previewfile" "/item/preview.png"'
+            echo "  \"visibility\" \"$visibility\""
+            echo "  \"title\" \"$title\""
+            echo "  \"description\" \"$description\""
+            echo "  \"changenote\" \"$note\""
+            echo '}'
+          } > "$RUNNER_TEMP/item.vdf"
+
+      - name: Release
+        if: env.MODE == 'release'
+        env:
+          ID: ${{ steps.item.outputs.id }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null && [ "$(git rev-parse "$TAG^{commit}")" != "$GITHUB_SHA" ]; then
+            echo "::error::the tag $TAG already exists at another commit: delete it, or release from that commit"
+            exit 1
+          fi
+          # A pre-release until the upload finishes, so that a run after a failed upload retries it.
+          pending=()
+          [ -z "$ID" ] || pending=(--prerelease)
+          gh release create "$TAG" Contents/mods/*/common/prepackaged.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${pending[@]}"
+
+      - name: Upload
+        if: env.MODE != 'none' && steps.item.outputs.id != ''
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}
+        run: |
+          # steamcmd keeps its login under $HOME/Steam; the secret is that config.vdf after a login with Steam Guard.
+          home="$RUNNER_TEMP/home"
+          mkdir -p "$home/Steam/config"
+          printf '%s\n' "$STEAM_CONFIG_VDF" > "$home/Steam/config/config.vdf"
+          docker run --rm -e HOME=/home/ci -v "$home:/home/ci" -v "$GITHUB_WORKSPACE:/item:ro" \
+            -v "$RUNNER_TEMP/item.vdf:/item.vdf:ro" "$STEAMCMD" \
+            +login "$STEAM_USERNAME" +workshop_build_item /item.vdf +quit || {
+            cat "$home"/Steam/logs/*.txt 2>/dev/null || true
+            if [ "$MODE" = page ]; then
+              echo "::error::the Workshop page update failed: run Publish again to retry it"
+            else
+              echo "::error::$TAG is released on GitHub, but its Workshop upload failed, so it stays a pre-release: run Publish again to retry the upload of $TAG"
+            fi
+            exit 1
+          }
+
+      - name: Finish
+        if: (env.MODE == 'release' || env.MODE == 'retry') && steps.item.outputs.id != ''
+        run: |
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          echo "::notice::$TAG is on the Workshop."

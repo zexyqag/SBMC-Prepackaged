@@ -13,25 +13,36 @@ The Prepackaged pack for [Steve's Bitchin' Mod Collection](https://steamcommunit
 `pack.txt` holds what the collection can't say: the pack's id and name, the top collection, the mods in load order (`Mods`), and later the optional mods, key binds, mod options, sandbox settings and locks. It uses Prepackaged's pack file format, without `version`, `WorkshopItems` and `@collections`, which come from the release and the live collection. A `Mods=` line pasted from a server `.ini` works as well.
 
 ```
-python3 build.py --version 1
+python3 build.py --version 1.0.0
 ```
 
 writes the pack file, `Contents/mods/SBMCPrepackaged/common/prepackaged.txt`, from `pack.txt` and the collection as Steam has it now. It needs Python 3 and no secrets. It lists the items whose Mod IDs (the description's `Mod ID:` lines) aren't in `Mods`, and the `Mods` entries no item in the collection declares. Add `--parser <Prepackaged>/Contents/mods/Prepackaged/42/media/lua/shared` to check the file with Prepackaged's own parser, which needs Lua 5.1 (`--lua` names the interpreter).
 
-The pack file is not committed. Each release builds it from the collection at that moment and attaches it to the GitHub release, so the release holds exactly what was uploaded and no stale copy sits in the repository.
+The pack file is not committed. Publish builds it from the collection at that moment and attaches it to the GitHub release, so the release holds exactly what was uploaded and no stale copy sits in the repository.
 
-## Releases
+## Publishing
 
-Publish a GitHub release tagged `v<N>`, with N a whole number above the last release's: it becomes the pack's `version`, and players are offered the update. The Workshop workflow then:
+Run the **Publish** workflow (Actions, Publish, Run workflow), optionally with notes for the top of the change log. It finds the latest release, the one with the highest `vMAJOR.MINOR.PATCH` tag (other tags don't count), builds the pack file, checks it with Prepackaged's parser and compares it with that release's `prepackaged.txt`, leaving out the version line, comments and blank lines:
 
-1. builds the pack file and checks it with Prepackaged's parser;
-2. uploads `Contents/` and `preview.png`, with the title, description and visibility in `workshop.txt` and the release notes as the change note;
-3. attaches `prepackaged.txt` to the release.
+- **Changed**, or a file under `Contents/` changed: a new release. Its version comes from the commits since the latest release, as below, and is at least a patch, also when only the collection changed on Steam. The first release is 1.0.0.
+- **Unchanged**, but the title, description or visibility in `workshop.txt`, or `preview.png`, changed: only the Workshop page is updated, and the pack keeps its version.
+- **Neither**: nothing is published.
 
-Running the workflow by hand with a release's tag uploads that release again.
+| Commit message | Version |
+|---|---|
+| `fix: ...` | patch: 1.4.2 to 1.4.3 |
+| `feat: ...` | minor: 1.4.2 to 1.5.0 |
+| `feat!: ...` (any type with `!`), or a `BREAKING CHANGE:` footer | major: 1.4.2 to 2.0.0 |
+| any other type (`docs:`, `chore:`, ...) or message | none |
+
+A scope is fine (`fix(maps): ...`), and the highest of the commits counts. Breaking means existing worlds may not survive the update, for example when mods are removed or change how saves work: start a new world or back up first. Prepackaged warns players about a new major version and lists the mods an update disables.
+
+A release is tagged `vX.Y.Z` at the commit the run built and named after its version. Its notes are the change log: the run's notes, the breaking changes, features and fixes from the commit messages, then what changed in the pack itself (mods added and removed with the Workshop item that declares each, load order moves, optional mods, key binds, mod options and sandbox settings, Workshop items and sub-collections), with long lists folded. `prepackaged.txt` is attached, and `Contents/` and `preview.png` are uploaded with the title, description and visibility in `workshop.txt` and the change log as the Steam change note.
+
+When the upload fails, the release stays a pre-release and the run fails. Run Publish again: it retries the upload of that release, as it was built, before it publishes anything newer. To give it up instead, delete the release and its tag.
 
 Setup: the `steam` environment holds the secrets `STEAM_USERNAME` and `STEAM_CONFIG_VDF` (steamcmd's `config/config.vdf` after a login with Steam Guard), and the repository variable `PREPACKAGED_REPO` names Prepackaged's GitHub repository. While `workshop.txt` has no `id=`, a release is only built and its `prepackaged.txt` attached, because the item doesn't exist yet. Put that file in `Contents/mods/SBMCPrepackaged/common/`, upload the item from the game, which creates it, sets its tags and writes its `id=` into `workshop.txt`, and commit that. Later releases upload by themselves.
 
 ## Drift check
 
-Every day the Drift workflow builds the lists from the live collection and compares them with the latest release's `prepackaged.txt`. While they differ, one issue lists the items added and removed in each sub-collection and the items with no Mod ID in `Mods`. It closes once they match again, usually after the next release. GitHub pauses the schedule after 60 days without a commit; the Actions tab turns it back on.
+Every day the Drift workflow builds the lists from the live collection and compares them with the latest release's `prepackaged.txt`. While they differ, one issue lists the items added and removed in each sub-collection and the items with no Mod ID in `Mods`. It closes once they match again, usually after the next Publish. GitHub pauses the schedule after 60 days without a commit; the Actions tab turns it back on.

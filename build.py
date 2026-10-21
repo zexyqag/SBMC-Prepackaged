@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the pack file from pack.txt and the live Steam collection tree, and reports where they differ.
 
-    python3 build.py --version N [--parser DIR] [--compare OLD --issue FILE]
+    python3 build.py --version MAJOR.MINOR.PATCH [--parser DIR] [--compare OLD --issue FILE] [--changes FILE [--previous OLD]]
 """
 import argparse
 import json
@@ -22,8 +22,10 @@ ITEM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id="
 BATCH = 100
 # EWorkshopFileType
 COLLECTION = 2
-VERSION = re.compile(r"[1-9][0-9]{0,8}")
+VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 GENERATED = {"version": "version", "workshopitems": "WorkshopItems"}
+# @pack keys that may repeat, their lists adding up.
+LIST_KEYS = {"collection", "maporder", "needs"}
 
 # Descriptions are BBCode, and the game's uploader ends them with a "Mod ID: <id>" line per mod.
 BLOCK_TAG = re.compile(r"\[\*\]|\[/?(?:h\d|p|list|olist|li|quote|code|table|tr|td|th|hr|br)\b[^\]]*\]", re.I)
@@ -326,24 +328,136 @@ def report(source, collections, order, items, info):
         print(f"  {mod}" + (f"  (maybe in {'; '.join(found)})" if found else ""))
 
 
+def unique(entries, more):
+    return entries + [entry for entry in dict.fromkeys(more) if entry not in entries]
+
+
 def read_pack(path):
-    """WorkshopItems and @collections of a pack file this script built."""
-    pack = {"items": [], "collections": {}}
+    """The entries of a pack file this script built, first ones kept, as Prepackaged's parser reads them."""
+    pack = {"items": [], "mods": [], "settings": {}, "optional": {}, "keys": {}, "options": {}, "sandbox": {}, "locks": [], "collections": {}}
     section = None
-    for line in map(trim, lines_of(path.read_text(encoding="utf-8-sig"))):
+    for raw in lines_of(path.read_text(encoding="utf-8-sig")):
+        line = trim(raw)
         if line.startswith("@"):
             section = trim(line[1:]).lower()
         elif line == "" or line.startswith("#"):
             continue
         elif section == "pack":
             key, _, value = line.partition("=")
-            if trim(key).lower() == "workshopitems":
-                pack["items"] += split_list(value)
+            key = trim(key).lower()
+            if key == "version":
+                continue
+            elif key == "workshopitems":
+                pack["items"] = unique(pack["items"], split_list(value))
+            elif key == "mods":
+                pack["mods"] = unique(pack["mods"], split_list(value.replace("\\", "")))
+            elif key in LIST_KEYS:
+                pack["settings"][key] = ";".join(unique(split_list(pack["settings"].get(key, "")), split_list(value)))
+            else:
+                pack["settings"].setdefault(key, trim(value))
+        elif section == "optional":
+            id, _, label = line.partition("=")
+            pack["optional"].setdefault(trim(id.replace("\\", "")), trim(label))
+        elif section == "keys":
+            name, _, spec = line.partition("=")
+            if not line.startswith("[") and trim(name) not in ("", "VERSION"):
+                pack["keys"].setdefault(trim(name), trim(spec))
+        elif section == "modoptions":
+            # A textentry value is kept as written, as Prepackaged's parser keeps it.
+            fields = raw.split("|")
+            if len(fields) == 4:
+                pack["options"].setdefault(f"{trim(fields[1])}|{trim(fields[2])}", f"{trim(fields[0])}|{fields[3]}")
+        elif section == "sandbox":
+            name, _, value = line.partition("=")
+            if trim(name) != "VERSION":
+                pack["sandbox"].setdefault(trim(name), trim(value))
+        elif section == "locks":
+            pack["locks"] = unique(pack["locks"], [line])
         elif section == "collections":
             id, _, rest = line.partition("=")
             title, _, entries = rest.rpartition("|")
-            pack["collections"][trim(id)] = {"title": trim(title), "entries": split_list(entries)}
+            pack["collections"].setdefault(trim(id), {"title": trim(title), "entries": split_list(entries)})
     return pack
+
+
+def content(text):
+    """The lines of a pack file that matter to players: not its version, comments or blank lines."""
+    kept = []
+    for line in map(trim, lines_of(text)):
+        if line and not line.startswith("#") and trim(line.partition("=")[0]).lower() != "version":
+            kept.append(line)
+    return kept
+
+
+def declarers(ids, info):
+    """Each declared Mod ID's first item of ids."""
+    found = {}
+    for id in ids:
+        for mod in (info.get(id) or {}).get("mods") or []:
+            found.setdefault(mod, id)
+    return found
+
+
+def moved(old, new):
+    """The mods of both lists that changed place: those outside a longest run still in the old order."""
+    place = {mod: n for n, mod in enumerate(old)}
+    both = [mod for mod in new if mod in place]
+    # Patience sorting: tails[k] ends the best run of length k + 1, back[] rebuilds it.
+    tails, back = [], {}
+    for mod in both:
+        lo, hi = 0, len(tails)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if place[tails[mid]] < place[mod]:
+                lo = mid + 1
+            else:
+                hi = mid
+        back[mod] = tails[lo - 1] if lo else None
+        tails[lo:lo + 1] = [mod]
+    kept, mod = set(), tails[-1] if tails else None
+    while mod is not None:
+        kept.add(mod)
+        mod = back[mod]
+    return [mod for mod in both if mod not in kept]
+
+
+def entry_changes(old, new):
+    return {"added": [[key, new[key]] for key in new if key not in old],
+            "changed": [[key, old[key], new[key]] for key in new if key in old and old[key] != new[key]],
+            "removed": [[key, old[key]] for key in old if key not in new]}
+
+
+def changes(old, new, info):
+    """What a release changes in the pack, for its change log; old is None for the first release."""
+    if old is None:
+        return {"first": True, "mods": len(new["mods"]), "optional": len(new["optional"]), "items": len(new["items"]),
+                "collections": len(new["collections"]), "keys": len(new["keys"]), "options": len(new["options"]),
+                "sandbox": len(new["sandbox"])}
+    where = declarers(new["items"] + old["items"], info)
+
+    def mod(id):
+        item = where.get(id)
+        return {"id": id, "item": item, "title": info[item]["title"] if item else ""}
+
+    def item(id, title=""):
+        return {"id": id, "title": (info.get(id) or {}).get("title") or title}
+
+    return {
+        "first": False,
+        "mods": {"added": [mod(m) for m in new["mods"] if m not in old["mods"]],
+                 "removed": [mod(m) for m in old["mods"] if m not in new["mods"]]},
+        "moved": [mod(m) for m in moved(old["mods"], new["mods"])],
+        "optional": entry_changes(old["optional"], new["optional"]),
+        "settings": entry_changes(old["settings"], new["settings"]),
+        "keys": entry_changes(old["keys"], new["keys"]),
+        "options": entry_changes(old["options"], new["options"]),
+        "sandbox": entry_changes(old["sandbox"], new["sandbox"]),
+        "locks": {"added": [l for l in new["locks"] if l not in old["locks"]], "removed": [l for l in old["locks"] if l not in new["locks"]]},
+        "items": {"added": [item(i) for i in new["items"] if i not in old["items"]],
+                  "removed": [item(i) for i in old["items"] if i not in new["items"]]},
+        "collections": {"added": [item(c) for c in new["collections"] if c not in old["collections"]],
+                        "removed": [item(c, old["collections"][c]["title"]) for c in old["collections"] if c not in new["collections"]]},
+    }
 
 
 def markdown(text):
@@ -404,7 +518,7 @@ def drift(old, source, collections, order, items, info):
     no_mod, _ = mod_report(source, items, info)
     body = [f"The live collection differs from the pack file of the latest release, {old['tag']}. "
             f"Items new to the pack: {len(gained)}. Items no longer in the collection: {len(lost)}. "
-            "Publish a release to update the pack, or change the collection back; this issue closes once they match.",
+            "Run the Publish workflow to update the pack, or change the collection back; this issue closes once they match.",
             *sections]
     if no_mod:
         groups = [f"{link(collection, info)}\n\n" + "\n".join(f"- {link(id, info)}: {mods_text(info[id], code=True)}" for id in ids)
@@ -416,16 +530,22 @@ def drift(old, source, collections, order, items, info):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--version", required=True, help="the pack's version, a whole number that goes up with every release")
+    parser.add_argument("--version", required=True, help="the pack's version, MAJOR.MINOR.PATCH")
     parser.add_argument("--parser", help="the folder holding Prepackaged/Parse.lua, to check the pack file with it")
     parser.add_argument("--lua", default="lua5.1", help="the Lua 5.1 interpreter (default lua5.1)")
     parser.add_argument("--compare", type=Path, help="a released pack file to compare the live collection with")
     parser.add_argument("--issue", type=Path, help="with --compare: where to write the issue text when they differ")
+    parser.add_argument("--changes", type=Path, help="where to write what the pack changes since --previous, as JSON")
+    parser.add_argument("--previous", type=Path, help="with --changes: the pack file of the latest release")
     args = parser.parse_args()
     if not VERSION.fullmatch(args.version):
-        raise Failure(f"--version {args.version} is not a whole number from 1 to 999999999")
+        raise Failure(f"--version {args.version} is not MAJOR.MINOR.PATCH, three whole numbers without leading zeros such as 1.0.0")
     if (args.compare is None) != (args.issue is None):
         raise Failure("--compare and --issue go together")
+    if args.previous and not args.changes:
+        raise Failure("--previous needs --changes")
+    if args.compare and args.previous:
+        raise Failure("--compare and --previous are for different runs")
 
     source = read_source(SOURCE)
     folder, mod_id = find_mod()
@@ -434,9 +554,8 @@ def main():
     order, items = tree_order(tops, collections)
     old = None
     extra = []
-    if args.compare:
-        old = read_pack(args.compare)
-        old["tag"] = f"v{args.version}"
+    if args.compare or args.previous:
+        old = read_pack(args.compare or args.previous)
         known = set(order) | set(items)
         extra = [id for id in dict.fromkeys(old["items"] + list(old["collections"])) if id not in known]
     info = describe(steam("GetPublishedFileDetails", "itemcount", "publishedfiledetails", order + items + extra))
@@ -453,7 +572,11 @@ def main():
     print()
     report(source, collections, order, items, info)
 
+    if args.changes:
+        args.changes.write_text(json.dumps(changes(old, read_pack(path), info), indent=1), encoding="utf-8")
+        print(f"\nWrote what the pack changes to {args.changes}.")
     if args.compare:
+        old["tag"] = f"v{args.version}"
         body = drift(old, source, collections, order, items, info)
         if body is None:
             args.issue.unlink(missing_ok=True)

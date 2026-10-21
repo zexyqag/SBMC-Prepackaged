@@ -1,7 +1,7 @@
 name: Drift
 
-# Compares the live collection with the pack file attached to the latest release, and keeps one issue
-# open while they differ.
+# Compares the live collection with the pack file attached to the latest release (the highest vMAJOR.MINOR.PATCH
+# tag, as Publish takes it), and keeps one issue open while they differ.
 on:
   schedule:
     - cron: '41 5 * * *'
@@ -29,20 +29,16 @@ jobs:
     outputs:
       tag: ${{ steps.latest.outputs.tag }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Latest release
         id: latest
         run: |
-          if ! release=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" 2> "$RUNNER_TEMP/error"); then
-            grep -q 'HTTP 404' "$RUNNER_TEMP/error" || { cat "$RUNNER_TEMP/error"; exit 1; }
-            echo "::notice::There is no release yet, so nothing to compare with"
-            exit 0
-          fi
-          tag=$(jq -r .tag_name <<< "$release")
-          if ! jq -e 'any(.assets[]; .name == "prepackaged.txt")' <<< "$release" > /dev/null; then
-            echo "::error::the latest release, $tag, has no prepackaged.txt: run the Workshop workflow for it again"
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.draft | not) | {tag: .tag_name, prerelease, assets: [.assets[].name]} | tojson' > "$RUNNER_TEMP/releases.json"
+          python3 publish.py latest "$RUNNER_TEMP/releases.json"
 
   check:
     needs: release
@@ -52,6 +48,8 @@ jobs:
       TAG: ${{ needs.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Prepackaged's repository
         env:
