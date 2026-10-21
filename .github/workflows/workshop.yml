@@ -2,8 +2,8 @@ name: Workshop
 
 # Builds the pack file from pack.txt and the live collection, uploads the Steam Workshop item named by
 # workshop.txt's id=: Contents/, preview.png, and the title, description and visibility in workshop.txt,
-# then attaches the pack file to the release for the drift check. The item's first upload, which also
-# sets its tags, is done from the game.
+# then attaches the pack file to the release for the drift check. Until workshop.txt has an id=, a release is
+# only built: the item's first upload, which creates it and sets its tags, is done from the game.
 on:
   release:
     types: [published]
@@ -79,14 +79,23 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: python3 build.py --version "$VERSION" --parser prepackaged/Contents/mods/Prepackaged/42/media/lua/shared
 
+      - name: Item id
+        id: item
+        run: |
+          id=$(sed -n 's/^id=//p' workshop.txt | tr -d '\r')
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          if [ -z "$id" ]; then
+            echo "::notice::workshop.txt has no id= yet, so this release is only built. Put its prepackaged.txt in $(echo Contents/mods/*/common)/, upload the item once from the game and commit the id= the game writes into workshop.txt. Later releases upload by themselves."
+          fi
+
       - name: Item manifest
+        if: steps.item.outputs.id != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          ID: ${{ steps.item.outputs.id }}
         run: |
           field() { sed -n "s/^$1=//p" workshop.txt | tr -d '\r'; }
           fail() { echo "::error::$1"; exit 1; }
-          id=$(field id)
-          [ -n "$id" ] || fail "workshop.txt has no id=: upload the item once from the game and commit the id it writes"
           [ -f preview.png ] || fail "preview.png is missing: add the item's art"
           # The same numbers as the game's uploader.
           case $(field visibility) in
@@ -109,7 +118,7 @@ jobs:
           "workshopitem"
           {
             "appid" "$APP_ID"
-            "publishedfileid" "$id"
+            "publishedfileid" "$ID"
             "contentfolder" "/item/Contents"
             "previewfile" "/item/preview.png"
             "visibility" "$visibility"
@@ -120,6 +129,7 @@ jobs:
           VDF
 
       - name: Upload
+        if: steps.item.outputs.id != ''
         env:
           STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
           STEAM_CONFIG_VDF: ${{ secrets.STEAM_CONFIG_VDF }}

@@ -30,7 +30,7 @@ Publish a GitHub release tagged `v<N>`, with N a whole number above the last rel
 
 Running the workflow by hand with a release's tag uploads that release again.
 
-Setup: the `steam` environment holds the secrets `STEAM_USERNAME` and `STEAM_CONFIG_VDF` (steamcmd's `config/config.vdf` after a login with Steam Guard), and the repository variable `PREPACKAGED_REPO` names Prepackaged's GitHub repository. The item's first upload is done from the game, which writes its `id=` into `workshop.txt`.
+Setup: the `steam` environment holds the secrets `STEAM_USERNAME` and `STEAM_CONFIG_VDF` (steamcmd's `config/config.vdf` after a login with Steam Guard), and the repository variable `PREPACKAGED_REPO` names Prepackaged's GitHub repository. While `workshop.txt` has no `id=`, a release is only built and its `prepackaged.txt` attached, because the item doesn't exist yet. Put that file in `Contents/mods/SBMCPrepackaged/common/`, upload the item from the game, which creates it, sets its tags and writes its `id=` into `workshop.txt`, and commit that. Later releases upload by themselves.
 
 ## Drift check
 
