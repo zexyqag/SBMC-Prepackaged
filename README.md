@@ -8,4 +8,4 @@ The Prepackaged pack for [Steve's Bitchin' Mod Collection](https://steamcommunit
 2. In the main menu, press **Prepackaged**, pick Steve's Bitchin' Mod Collection, press **Use this pack** and check the review.
 3. **Apply** backs up your mod list and puts the pack's mods in place, in the pack's load order.
 
-To work on the pack itself, see [CONTRIBUTING.md](CONTRIBUTING.md).
+To contribute to the pack, see [CONTRIBUTING.md](CONTRIBUTING.md).
